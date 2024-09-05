@@ -10,6 +10,14 @@ from skimage.restoration import unwrap_phase
 from image_sharpening import FocusDiversePhaseRetrieval, ft_rev, mft_rev
 from image_sharpening import InstrumentConfiguration
 
+from prysm.polynomials import (
+    noll_to_nm,
+    zernike_nm_sequence,
+    lstsq
+)
+from prysm.coordinates import make_xy_grid, cart_to_polar
+from prysm.geometry import circle,spider
+
 ## -- functions
 
 def build_median_image(files, size):
@@ -84,11 +92,11 @@ def apply_image_sharpening(psf_list, pixel_dx, distance_list, steps=200, pix_to_
 
 
 
-
-    orkid_params = {'image_dx': pix_to_um, # FIXME: ORKID Pixel size, microns
-                    'efl': 338492, # ORKID effective focal length, mm
+    epd = 10950 # in mm
+    orkid_params = {'image_dx': 12.2, # um 
+                    'efl': 34.3 * epd, # ORKID effective focal length, mm
                     'wavelength': 0.94, # FIXME: ORKID center wavelength, microns
-                    'pupil_size': 10950, # Keck entrance pupil diameter
+                    'pupil_size': epd, # Keck entrance pupil diameter
                     }
 
     orkid_conf = InstrumentConfiguration(orkid_params)
@@ -226,6 +234,18 @@ def phase_unwrap_2d(phase_wrapped):
     phout = np.real(phi)
     return phout
 
+def unpack_zernikes(phase_img, n_modes, modes_to_exclude):
+    npix = phase_img.shape[0]
+    x, y = make_xy_grid(npix, diameter=1)
+    r, t = cart_to_polar(x, y)
+
+    nzern = 100
+    nms = [noll_to_nm(i) for i in range(nzern)]
+    basis = np.array(list(zernike_nm_sequence(nms, r, t, norm=True)))
+    coefs = lstsq(basis, phase_img)
+    fit_polys = np.array([c*b for c,b in zip(coefs, basis)])
+    reconstructed_image = np.sum(fit_polys, axis=0)
+    return reconstructed_image
 
 ## -- big scripty chunk of operations 
 
@@ -248,31 +268,31 @@ if __name__ == "__main__":
     # 4. smooth the images 
 
     # median combine time
-    psf_focused = build_median_image(files_0, (200,200))
+    psf_focused = build_median_image(files_0, (150,150))
     
-    plt.imshow(np.log10(psf_focused))
-    plt.colorbar()
-    plt.savefig('raw_focused.png')
-    plt.clf()
+    #plt.imshow(np.log10(psf_focused))
+    #plt.colorbar()
+    #plt.savefig('raw_focused.png')
+    #plt.clf()
 
-    psf_2 = build_median_image(files_2, (200,200))
+    psf_2 = build_median_image(files_2, (150,150))
     
-    plt.imshow(np.log10(psf_2))
-    plt.colorbar()
-    plt.savefig('raw_2mm.png')
-    plt.clf()
+    #plt.imshow(np.log10(psf_2))
+    #plt.colorbar()
+    #plt.savefig('raw_2mm.png')
+    #plt.clf()
 
-    psf_4 = build_median_image(files_4, (200,200))
+    psf_4 = build_median_image(files_4, (150,150))
     
-    plt.imshow(np.log10(psf_4))
-    plt.colorbar()
-    plt.savefig('raw_4mm.png')
+    #plt.imshow(np.log10(psf_4))
+    #plt.colorbar()
+    #plt.savefig('raw_4mm.png')
 
-    psf_2_neg = build_median_image(files_neg, (200,200))
+    psf_2_neg = build_median_image(files_neg, (150,150))
     
-    plt.imshow(np.log10(psf_2_neg))
-    plt.colorbar()
-    plt.savefig('raw_-2mm.png')
+    #plt.imshow(np.log10(psf_2_neg))
+    #plt.colorbar()
+    #plt.savefig('raw_-2mm.png')
     
     # background subtraction 
     bkg_reference = psf_focused[:, -30:]
@@ -288,52 +308,77 @@ if __name__ == "__main__":
     recenter_2_neg, _ = recenter(bkg_sub_2_neg, 110, center=center)
     
     # smoothing
-    gauss = 8
-    smooth_focus = smooth(recenter_focus, gauss)
+    #gauss = 8
+    #smooth_focus = smooth(recenter_focus, gauss)
     
     # and now's a good time to save some outputs 
-    plt.imshow(smooth_focus)
-    plt.colorbar()
-    plt.savefig('smoothed_focus.png')
-    plt.clf()
+    #plt.imshow(smooth_focus)
+    #plt.colorbar()
+    #plt.savefig('smoothed_focus.png')
+    #plt.clf()
 
-    smooth_2 = smooth(recenter_2, gauss)
-    plt.imshow(smooth_2)
-    plt.colorbar()
-    plt.savefig('smoothed_2mm.png')
-    plt.clf()
+    #smooth_2 = smooth(recenter_2, gauss)
+    #plt.imshow(smooth_2)
+    #plt.colorbar()
+    #plt.savefig('smoothed_2mm.png')
+    #plt.clf()
 
-    smooth_4 = smooth(recenter_4, gauss)
-    plt.imshow(smooth_4)
-    plt.colorbar()
-    plt.savefig('smoothed_4mm.png')
-    plt.clf()
+    #smooth_4 = smooth(recenter_4, gauss)
+    #plt.imshow(smooth_4)
+    #plt.colorbar()
+    #plt.savefig('smoothed_4mm.png')
+    #plt.clf()
 
-    smooth_2_neg = smooth(recenter_2_neg, gauss)
-    plt.imshow(smooth_2_neg)
-    plt.colorbar()
-    plt.savefig('smoothed_-2mm.png')
-    plt.clf()
+    #smooth_2_neg = smooth(recenter_2_neg, gauss)
+    #plt.imshow(smooth_2_neg)
+    #plt.colorbar()
+    #plt.savefig('smoothed_-2mm.png')
+    #plt.clf()
 
 
     # Now we can build up our list and do our psf sharpening
-    psf_list = [smooth_focus, smooth_2, smooth_4, smooth_2_neg]
+    #psf_list = [recenter_focus[29:81, 29:81], 
+    #            recenter_2[29:81, 29:81],
+    #            recenter_4[29:81, 29:81], 
+    #            recenter_2_neg[29:81, 29:81]]
+    psf_list = [recenter_focus, recenter_2, recenter_4, recenter_2_neg]
     distance_list = [-2e3, -4e3, 2e3]
-    pixel_dx = 110 
+    pixel_dx = 110 # 52 
     phase_est = apply_image_sharpening(psf_list, pixel_dx, distance_list, steps=200, pix_to_um=4.837)
+   
     
     plt.imshow(phase_est)
     plt.colorbar()
     plt.savefig('phase_est.png')
     plt.clf()
+
+    unpacked_phase_est = unpack_zernikes(phase_est, 300, 3)
+    plt.imshow(unpacked_phase_est)
+    plt.colorbar()
+    plt.savefig('phase_est_zern.png')
+    plt.clf()
     
     # And finally turn it into a command and write it out 
     mask = np.loadtxt('../../../flats/k2_dm_mask.txt')
+    plt.imshow(phase_est)
+    plt.colorbar()
+    plt.plot('full_phase.png')
+    plt.clf()
+
     cmd, cmd_apply = convert_phase_to_dm_cmd(phase_est, mask)
-      
+    cmd_zern, cmd_apply_zern = convert_phase_to_dm_cmd(unpacked_phase_est, mask)
+
     plt.imshow(cmd)
     plt.colorbar()
     plt.savefig('cmd_out.png')
+    plt.clf()
+
+    plt.imshow(cmd_zern)
+    plt.colorbar()
+    plt.savefig('cmd_out_zern.png')
+    plt.clf()
 
     hdulist = fits.HDUList([fits.PrimaryHDU(cmd)])
     hdulist.writeto('cmd_out.fits', overwrite=True)
+    hdulist = fits.HDUList([fits.PrimaryHDU(cmd_zern)])
+    hdulist.writeto('cmd_out_zern.fits', overwrite=True)
