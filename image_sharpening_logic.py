@@ -7,8 +7,8 @@ import numpy as np
 from skimage.transform import resize 
 from skimage.restoration import unwrap_phase
 
-from image_sharpening import FocusDiversePhaseRetrieval, ft_rev, mft_rev
-from image_sharpening import InstrumentConfiguration
+from image_sharpening import FocusDiversePhaseRetrieval, ft_rev, mft_rev, InstrumentConfiguration
+from processing import phase_unwrap_2d
 
 from prysm.polynomials import (
     noll_to_nm,
@@ -102,12 +102,16 @@ def apply_image_sharpening(psf_list, pixel_dx, distance_list, steps=200, pix_to_
     orkid_conf = InstrumentConfiguration(orkid_params)
 
     # build the mp object from the phase retreival code 
-    mp = FocusDiversePhaseRetrieval(psf_list, wavelength, dx_list, distance_list)
+    mp = FocusDiversePhaseRetrieval(psf_list, wavelength, dx_list,
+            distance_list, phase_guess=np.zeros_like(psf_list[0]))
     for i in range(200):
         psf_est = mp.step()
     
     pup_phase_est = np.angle(mft_rev(psf_est, orkid_conf))
-
+    plt.imshow(pup_phase_est)
+    plt.colorbar()
+    plt.savefig('unwrapped_phase_est.png')
+    plt.clf()
     # current HACK -- seeing weird edge effects -- this is me cropping them out... 
     # applying a fourier transform to the image, and then using np.angle to
     # scoop out the associated phase 
@@ -140,117 +144,36 @@ def convert_phase_to_dm_cmd(pupil_phase, mask, wv=0.94):
     return cmd, cmd_flat
 
 
-## stolen from jaren 
-def phase_unwrap_2d(phase_wrapped):
-
-    """phase unwrapping routine based on the phaseunwrap2d.go script in IDL and the following proceedings:
-    M.D. Pritt; J.S. Shipman, "Least-squares two-dimensional phase unwrapping using FFT's",
-    IEEE Transactions on Geoscience and Remote Sensing ( Volume: 32, Issue: 3, May 1994),
-    DOI: 10.1109/36.297989
-
-    Uses a finite differences approach to determine the partial derivative of the wrapped phase in x and y,
-    then solves the solution in the fourier domain
-
-    TODO: Test this function against the prior in IDL, it doesn't appear to reconstruct phase well
-
-    Parameters
-    ----------
-    phase_wrapped : numpy.ndarray
-        array containing 2D signal to unwrap
-
-    Returns
-    -------
-    numpy.ndarray
-        unwrapped phase
-    """
-
-    imsize = phase_wrapped.shape
-    M = imsize[0]
-    N = imsize[1]
-
-    Nmirror = 2 * (N )
-    Mmirror = 2 * (M )
-
-    phmirror = np.ones([Mmirror,Nmirror])
-
-    # Quadrant 3
-    phmirror[:M,:N] = phase_wrapped
-
-    # First mirror reflection Quadrant 2
-    phmirror[M:,:N] = np.flipud(phase_wrapped)
-
-    # Second mirror reflection Quadrant 4
-    phmirror[:M,N:] = np.fliplr(phase_wrapped)
-
-    # Final reflection Quadrant 1
-    phmirror[M:,N:] = np.flipud(np.fliplr(phase_wrapped))
-
-    phroll = np.zeros_like(phmirror)
-    phroll[:M,:N-1] = phmirror[:M,1:N]
-    phroll[:M,N-1] = phmirror[:M,0]
-    deltafd = phroll-phmirror
-
-    pluspi = np.pi*np.ones_like(phmirror)
-    mask = (deltafd > pluspi).astype(int)
-
-    deltafd = deltafd - mask*2*np.pi
-    negpi = -pluspi
-    mask = (deltafd < negpi).astype(int)
-    deltafd = deltafd + mask * 2 * np.pi
-    deltafdx = deltafd
-
-    # compute forward difference
-    phroll = np.zeros_like(phmirror)
-    phroll[:M-1,:N] = phmirror[1:M,:N]
-    phroll[M,:N] = phmirror[0,:N]
-    deltafd = phroll - phmirror
-
-    pluspi = np.pi*np.ones_like(phmirror)
-    mask = (deltafd > pluspi).astype(int)
-    deltafd = deltafd - mask*2*np.pi
-    negpi = -pluspi
-    mask = (deltafd < negpi).astype(int)
-    deltafd = deltafd + mask * 2 * np.pi
-    deltafdy = deltafd
-
-    # Solve system of equations formed by min LS -> phi
-    D_n = np.fft.fft2(deltafdx)
-    D_m = np.fft.fft2(deltafdy)
-    inc_n = 2 * np.pi / Nmirror
-    inc_m = 2 * np.pi / Mmirror
-
-    nn = np.ones([Mmirror,1]) @ (np.arange(Nmirror))[np.newaxis]
-    mm = np.ones([Nmirror,1]) @ (np.arange(Mmirror))[np.newaxis]
-    mm = mm.transpose()
-    
-    i = 1j
-    mult_n = np.ones([Mmirror,Nmirror]) - np.exp(-nn * i * inc_n)
-    mult_m = np.ones([Mmirror,Nmirror]) - np.exp(-mm * i * inc_m)
-    divisor = (np.cos(mm*inc_m) + np.cos(nn*inc_n) - np.ones([Mmirror,Nmirror])*2)*2
-    divisor[0,0] = 1
-    phi = (D_n*mult_n + D_m*mult_m) / divisor
-    phi[0,0] = 0
-    phi = np.fft.ifft2(phi)[:M,:N]
-    phout = np.real(phi)
-    return phout
-
 def unpack_zernikes(phase_img, n_modes, modes_to_exclude):
     npix = phase_img.shape[0]
+
+    x = np.linspace(-1, 1, npix)
+    x, y = np.meshgrid(x, x)
+    A = np.zeros_like(x)
+    A[x**2 + y**2 < 1] = 1
+    
     x, y = make_xy_grid(npix, diameter=1)
     r, t = cart_to_polar(x, y)
-
+ 
     nzern = 100
     nms = [noll_to_nm(i) for i in range(nzern)]
     basis = np.array(list(zernike_nm_sequence(nms, r, t, norm=True)))
-    coefs = lstsq(basis, phase_img)
+    coefs = lstsq(basis, phase_img*A)
+    plt.plot(coefs, '.', color='cyan')
+    plt.xlim(0, 15)
+    plt.xlabel('zernike mode')
+    plt.ylabel('coeff')
+    plt.savefig('zernike_coeffs.png')
+    plt.clf()
+
     fit_polys = np.array([c*b for c,b in zip(coefs, basis)])
     reconstructed_image = np.sum(fit_polys, axis=0)
     return reconstructed_image
-
-## -- big scripty chunk of operations 
+ 
+### -- big scripty chunk of operations 
 
 if __name__ == "__main__":
-
+    
     # pull in files
     # our first set had an even number so zap one 
     files_0 = glob.glob('0/*.fits')
@@ -268,27 +191,29 @@ if __name__ == "__main__":
     # 4. smooth the images 
 
     # median combine time
-    psf_focused = build_median_image(files_0, (150,150))
+    px_size = 150
+    #px_size = 200
+    psf_focused = build_median_image(files_0, (px_size, px_size))
     
-    #plt.imshow(np.log10(psf_focused))
-    #plt.colorbar()
-    #plt.savefig('raw_focused.png')
-    #plt.clf()
+    plt.imshow(np.log10(psf_focused))
+    plt.colorbar()
+    plt.savefig('raw_focused.png')
+    plt.clf()
 
-    psf_2 = build_median_image(files_2, (150,150))
+    psf_2 = build_median_image(files_2, (px_size, px_size))
     
     #plt.imshow(np.log10(psf_2))
     #plt.colorbar()
     #plt.savefig('raw_2mm.png')
     #plt.clf()
 
-    psf_4 = build_median_image(files_4, (150,150))
+    psf_4 = build_median_image(files_4, (px_size, px_size))
     
     #plt.imshow(np.log10(psf_4))
     #plt.colorbar()
     #plt.savefig('raw_4mm.png')
 
-    psf_2_neg = build_median_image(files_neg, (150,150))
+    psf_2_neg = build_median_image(files_neg, (px_size, px_size))
     
     #plt.imshow(np.log10(psf_2_neg))
     #plt.colorbar()
@@ -337,13 +262,13 @@ if __name__ == "__main__":
 
 
     # Now we can build up our list and do our psf sharpening
-    #psf_list = [recenter_focus[29:81, 29:81], 
-    #            recenter_2[29:81, 29:81],
-    #            recenter_4[29:81, 29:81], 
-    #            recenter_2_neg[29:81, 29:81]]
-    psf_list = [recenter_focus, recenter_2, recenter_4, recenter_2_neg]
-    distance_list = [-2e3, -4e3, 2e3]
-    pixel_dx = 110 # 52 
+    psf_list = [recenter_focus[29:81, 29:81], 
+                recenter_2[29:81, 29:81],
+                recenter_4[29:81, 29:81], 
+                recenter_2_neg[29:81, 29:81]]
+    #psf_list = [recenter_focus, recenter_2, recenter_4, recenter_2_neg]
+    distance_list = [2e3, 4e3, -2e3]
+    pixel_dx = 52 #110 
     phase_est = apply_image_sharpening(psf_list, pixel_dx, distance_list, steps=200, pix_to_um=4.837)
    
     
@@ -353,13 +278,14 @@ if __name__ == "__main__":
     plt.clf()
 
     unpacked_phase_est = unpack_zernikes(phase_est, 300, 3)
-    plt.imshow(unpacked_phase_est)
+    plt.imshow(unpacked_phase_est, vmin=-5, vmax=5)
     plt.colorbar()
     plt.savefig('phase_est_zern.png')
     plt.clf()
     
     # And finally turn it into a command and write it out 
-    mask = np.loadtxt('../../../flats/k2_dm_mask.txt')
+    mask = np.loadtxt('../../../../../flats/k2_dm_mask.txt')
+    #mask = np.loadtxt('../../../flats/k2_dm_mask.txt')
     plt.imshow(phase_est)
     plt.colorbar()
     plt.plot('full_phase.png')
@@ -378,7 +304,10 @@ if __name__ == "__main__":
     plt.savefig('cmd_out_zern.png')
     plt.clf()
 
+    hdulist = fits.HDUList([fits.PrimaryHDU(unpacked_phase_est)])
+    hdulist.writeto('phase_est_zern.fits', overwrite=True)
     hdulist = fits.HDUList([fits.PrimaryHDU(cmd)])
     hdulist.writeto('cmd_out.fits', overwrite=True)
     hdulist = fits.HDUList([fits.PrimaryHDU(cmd_zern)])
     hdulist.writeto('cmd_out_zern.fits', overwrite=True)
+
